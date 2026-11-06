@@ -1,7 +1,9 @@
-# Minimal overlay on the VPS-local 1.8.0 image (same digest as previously running stock).
-ARG BASE_IMAGE=chatgpt2api:1.8.0-stock
+# Overlay on holala.1 (keeps prior max5 + b64 nosave patches). Fall back ARG to stock if needed.
+ARG BASE_IMAGE=chatgpt2api:1.8.0-holala.1
 FROM ${BASE_IMAGE}
 COPY VERSION /app/VERSION
 COPY services/account_service.py /app/services/account_service.py
 COPY services/config.py /app/services/config.py
 COPY services/protocol/conversation.py /app/services/protocol/conversation.py
+COPY api/accounts.py /app/api/accounts.py
+COPY web_dist /app/web_dist

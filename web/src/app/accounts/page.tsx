@@ -52,6 +52,7 @@ import {
   refreshAccounts,
   testProxy,
   updateAccount,
+  batchUpdateAccountStatus,
   type Account,
   type AccountRefreshResponse,
   type AccountStatus,
@@ -185,6 +186,7 @@ function AccountsPageContent() {
   const [refreshingTokens, setRefreshingTokens] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isBatchUpdating, setIsBatchUpdating] = useState(false);
   const [isRelogining, setIsRelogining] = useState(false);
   const [progress, setProgress] = useState<{
     visible: boolean;
@@ -674,6 +676,77 @@ function AccountsPageContent() {
     }
   };
 
+
+  const handleBatchUpdateStatus = async (status: Extract<AccountStatus, "正常" | "禁用">) => {
+    if (selectedTokens.length === 0) {
+      toast.error("请先选择账号");
+      return;
+    }
+    if (isBatchUpdating || isUpdating || isDeleting || isRefreshing || isRelogining) {
+      return;
+    }
+    if (status === "禁用") {
+      const ok = window.confirm(`确定将选中的 ${selectedTokens.length} 个账号设为禁用？`);
+      if (!ok) return;
+    } else {
+      const disabledSelected = accounts.filter(
+        (item) => selectedTokens.includes(item.access_token) && item.status === "禁用",
+      ).length;
+      if (disabledSelected === 0) {
+        toast.error("选中项中没有禁用账号可启用");
+        return;
+      }
+      const ok = window.confirm(
+        `确定尝试启用选中的 ${disabledSelected} 个禁用账号？最多补足至 5 个正常（仅处理禁用号，不会把异常/限流设为正常）。`,
+      );
+      if (!ok) return;
+    }
+
+    setIsBatchUpdating(true);
+    try {
+      const data = await batchUpdateAccountStatus(selectedTokens, status);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      if (status === "禁用") {
+        const parts = [
+          `已禁用 ${data.disabled} 个`,
+          data.skipped ? `已是禁用跳过 ${data.skipped} 个` : "",
+          data.failed ? `失败 ${data.failed} 个` : "",
+        ].filter(Boolean);
+        if (data.failed > 0) {
+          toast.error(parts.join("，"));
+        } else {
+          toast.success(parts.join("，"));
+        }
+      } else {
+        const parts = [
+          `已启用 ${data.enabled} 个`,
+          data.capped ? `因 ${data.max_normal_accounts} 正常上限未启用 ${data.capped} 个` : "",
+          data.skipped ? `非禁用跳过 ${data.skipped} 个` : "",
+          data.failed ? `失败 ${data.failed} 个` : "",
+        ].filter(Boolean);
+        if (data.failed > 0 || data.capped > 0) {
+          // capped is expected constraint, still show as warning-ish via error if also failed else success with detail
+          if (data.failed > 0) toast.error(parts.join("，"));
+          else toast.success(parts.join("，"));
+        } else {
+          toast.success(parts.join("，") || "没有可启用的禁用账号");
+        }
+      }
+      if (data.errors?.length) {
+        const sample = data.errors
+          .slice(0, 3)
+          .map((item) => `${item.hint}: ${item.error}`)
+          .join("；");
+        toast.message(`部分账号详情：${sample}${data.errors.length > 3 ? "…" : ""}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "批量更新状态失败");
+    } finally {
+      setIsBatchUpdating(false);
+    }
+  };
+
   const handleUpdateAccount = async () => {
     if (!editingAccount) {
       return;
@@ -989,6 +1062,25 @@ function AccountsPageContent() {
           <CardContent className="space-y-0 p-0">
             <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                  onClick={() => void handleBatchUpdateStatus("禁用")}
+                  disabled={selectedTokens.length === 0 || isBatchUpdating || isUpdating || isDeleting || isRefreshing || isRelogining}
+                >
+                  {isBatchUpdating ? <LoaderCircle className="size-4 animate-spin" /> : <Ban className="size-4" />}
+                  批量禁用
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-3 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+                  onClick={() => void handleBatchUpdateStatus("正常")}
+                  disabled={selectedTokens.length === 0 || isBatchUpdating || isUpdating || isDeleting || isRefreshing || isRelogining}
+                  title="仅处理选中的禁用账号，最多补足至 5 个正常"
+                >
+                  {isBatchUpdating ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+                  批量取消禁用
+                </Button>
                 <Button
                   variant="ghost"
                   className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
