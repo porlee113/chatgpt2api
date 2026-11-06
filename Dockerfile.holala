@@ -1,6 +1,5 @@
-# Minimal overlay on the exact VPS-running 1.8.0 image digest.
-# Keeps web_dist and runtime deps; only replaces patched Python modules + VERSION.
-ARG BASE_IMAGE=ghcr.io/basketikun/chatgpt2api@sha256:b9277b504014aa9ebf53fd12762a1616784f0ccb0ead2c5e223a68c91d83bcd1
+# Minimal overlay on the VPS-local 1.8.0 image (same digest as previously running stock).
+ARG BASE_IMAGE=chatgpt2api:1.8.0-stock
 FROM ${BASE_IMAGE}
 COPY VERSION /app/VERSION
 COPY services/account_service.py /app/services/account_service.py
