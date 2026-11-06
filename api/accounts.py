@@ -63,6 +63,11 @@ class AccountExportRequest(BaseModel):
     format: Literal["json", "zip"] = "json"
 
 
+
+class AccountBatchStatusRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+    status: str = ""
+
 class AccountUpdateRequest(BaseModel):
     access_token: str = ""
     type: str | None = None
@@ -329,6 +334,21 @@ def create_router() -> APIRouter:
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="codex-accounts-{timestamp}.json"'},
         )
+
+
+    @router.post("/api/accounts/batch-update-status")
+    async def batch_update_account_status(body: AccountBatchStatusRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        access_tokens = [str(token or "").strip() for token in (body.access_tokens or []) if str(token or "").strip()]
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+        status = str(body.status or "").strip()
+        if status not in {"正常", "禁用"}:
+            raise HTTPException(status_code=400, detail={"error": "status must be 正常 or 禁用"})
+        try:
+            return await run_in_threadpool(account_service.batch_update_status, access_tokens, status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):

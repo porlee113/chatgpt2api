@@ -1,0 +1,11 @@
+# Overlay on holala.2 (batch status UI + prior patches).
+ARG BASE_IMAGE=chatgpt2api:1.8.0-holala.2
+FROM ${BASE_IMAGE}
+COPY VERSION /app/VERSION
+COPY services/account_service.py /app/services/account_service.py
+COPY services/config.py /app/services/config.py
+COPY services/protocol/conversation.py /app/services/protocol/conversation.py
+COPY api/accounts.py /app/api/accounts.py
+# Replace frontend entirely (COPY into existing dir merges and leaves stale chunks).
+RUN rm -rf /app/web_dist
+COPY web_dist /app/web_dist
