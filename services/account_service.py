@@ -136,6 +136,28 @@ class AccountService:
             return False
         return int(account.get("quota") or 0) > 0
 
+    def _count_normal_accounts_locked(self) -> int:
+        return sum(1 for account in self._accounts.values() if account.get("status") == "正常")
+
+    def _apply_status_guards_locked(self, current: dict | None, account: dict) -> dict:
+        """Never promote into 正常 beyond max_normal_accounts.
+
+        Intentional enable (UI / batch) is allowed when under the cap.
+        Remote refresh must keep 禁用 via fetch_remote_info, not here.
+        """
+        if not isinstance(account, dict):
+            return account
+        next_item = dict(account)
+        current_status = str((current or {}).get("status") or "").strip()
+        next_status = str(next_item.get("status") or "").strip()
+
+        if next_status == "正常" and current_status != "正常":
+            if self._count_normal_accounts_locked() >= config.max_normal_accounts:
+                # Stay at previous non-normal status (限流/禁用/异常/empty→禁用).
+                fallback = current_status if current_status and current_status != "正常" else "禁用"
+                next_item["status"] = fallback
+        return next_item
+
     @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
         if not plan_type:
@@ -838,7 +860,8 @@ class AccountService:
             return [
                 token
                 for account in self._accounts.values()
-                if str(account.get("refresh_token") or "").strip()
+                if account.get("status") != "禁用"
+                and str(account.get("refresh_token") or "").strip()
                 and (token := str(account.get("access_token") or "").strip())
                 and self._token_needs_refresh(token)
             ]
@@ -1162,14 +1185,15 @@ class AccountService:
             added = 0
             skipped = 0
             for access_token, payload in deduped.items():
-                current = self._accounts.get(access_token)
-                if current is None:
+                existing = self._accounts.get(access_token)
+                if existing is None:
                     added += 1
                     self._cumulative_total += 1
                     self._save_cumulative_total()
                     current = {"created_at": self._now()}
                 else:
                     skipped += 1
+                    current = existing
                 incoming = dict(payload)
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
@@ -1182,6 +1206,8 @@ class AccountService:
                     }
                 )
                 if account is not None:
+                    # Keep existing 正常; only new/promoted 正常 consume remaining slots.
+                    account = self._apply_status_guards_locked(existing, account)
                     self._accounts[access_token] = account
             self._save_accounts()
             items = [dict(item) for item in self._accounts.values()]
@@ -1213,6 +1239,106 @@ class AccountService:
             items = [dict(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
 
+    def batch_update_status(self, access_tokens: list[str], status: str) -> dict[str, Any]:
+        """Bulk set status for selected accounts.
+
+        - status=禁用: apply to every selected account that is not already 禁用.
+        - status=正常: only accounts currently 禁用; max_normal_accounts still enforced.
+        Never leaks raw tokens in the summary; hints use anonymize_token / email.
+        """
+        target = str(status or "").strip()
+        if target not in {"正常", "禁用"}:
+            raise ValueError("status must be 正常 or 禁用")
+
+        tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        enabled = 0
+        disabled = 0
+        capped = 0
+        skipped = 0
+        failed = 0
+        errors: list[dict[str, str]] = []
+
+        def _hint(account: dict | None, token: str) -> str:
+            email = str((account or {}).get("email") or "").strip()
+            if email:
+                return email
+            return anonymize_token(token)
+
+        for token in tokens:
+            account = self.get_account(token)
+            if account is None:
+                failed += 1
+                errors.append({"hint": anonymize_token(token), "error": "账号不存在"})
+                continue
+            current_status = str(account.get("status") or "").strip()
+            try:
+                if target == "正常":
+                    if current_status != "禁用":
+                        skipped += 1
+                        continue
+                    updated = self.update_account(token, {"status": "正常"}, quiet=True)
+                    if updated is None:
+                        failed += 1
+                        errors.append({"hint": _hint(account, token), "error": "更新失败"})
+                        continue
+                    if updated.get("status") == "正常":
+                        enabled += 1
+                    elif updated.get("status") == "禁用":
+                        capped += 1
+                    else:
+                        failed += 1
+                        errors.append({
+                            "hint": _hint(updated, token),
+                            "error": f"状态变为 {updated.get('status')}",
+                        })
+                else:
+                    if current_status == "禁用":
+                        skipped += 1
+                        continue
+                    updated = self.update_account(token, {"status": "禁用"}, quiet=True)
+                    if updated is None:
+                        failed += 1
+                        errors.append({"hint": _hint(account, token), "error": "更新失败"})
+                        continue
+                    if updated.get("status") == "禁用":
+                        disabled += 1
+                    else:
+                        failed += 1
+                        errors.append({
+                            "hint": _hint(updated, token),
+                            "error": f"状态变为 {updated.get('status')}",
+                        })
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                errors.append({"hint": _hint(account, token), "error": str(exc)[:160]})
+
+        if enabled or disabled or capped:
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "批量更新账号状态",
+                {
+                    "target": target,
+                    "requested": len(tokens),
+                    "enabled": enabled,
+                    "disabled": disabled,
+                    "capped": capped,
+                    "skipped": skipped,
+                    "failed": failed,
+                },
+            )
+        return {
+            "target": target,
+            "requested": len(tokens),
+            "enabled": enabled,
+            "disabled": disabled,
+            "capped": capped,
+            "skipped": skipped,
+            "failed": failed,
+            "errors": errors,
+            "items": self.list_accounts(),
+            "max_normal_accounts": config.max_normal_accounts,
+        }
+
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
         if not access_token:
             return None
@@ -1224,6 +1350,7 @@ class AccountService:
             account = self._normalize_account({**current, **updates, "access_token": access_token})
             if account is None:
                 return None
+            account = self._apply_status_guards_locked(current, account)
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
@@ -1322,6 +1449,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is None:
                 return None
+            account = self._apply_status_guards_locked(current, account)
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
@@ -1378,7 +1506,12 @@ class AccountService:
                     self.remove_invalid_token(active_token, event)
                 raise
         self._record_refresh_success(active_token)
-        return self.update_account(active_token, result)
+        current = self.get_account(active_token)
+        payload = dict(result or {})
+        # Remote refresh must never auto-enable a disabled account.
+        if current is not None and current.get("status") == "禁用":
+            payload["status"] = "禁用"
+        return self.update_account(active_token, payload)
 
     # ---- 刷新进度追踪 ----
 
@@ -1485,8 +1618,18 @@ class AccountService:
         access_tokens: list[str],
         progress_id: str | None = None,
         defer_invalid_removal: bool = True,
+        *,
+        include_disabled: bool = False,
     ) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        if not include_disabled:
+            filtered: list[str] = []
+            for token in access_tokens:
+                account = self.get_account(token)
+                if account is not None and account.get("status") == "禁用":
+                    continue
+                filtered.append(token)
+            access_tokens = filtered
         if not access_tokens:
             items = self.list_accounts()
             result = {"refreshed": 0, "errors": [], "items": items, "relogined": 0}
