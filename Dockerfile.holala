@@ -1,0 +1,11 @@
+# Overlay on holala.3.
+ARG BASE_IMAGE=chatgpt2api:1.8.0-holala.3
+FROM ${BASE_IMAGE}
+COPY VERSION /app/VERSION
+COPY services/account_service.py /app/services/account_service.py
+COPY services/config.py /app/services/config.py
+COPY services/protocol/conversation.py /app/services/protocol/conversation.py
+COPY api/accounts.py /app/api/accounts.py
+COPY api/support.py /app/api/support.py
+RUN rm -rf /app/web_dist
+COPY web_dist /app/web_dist

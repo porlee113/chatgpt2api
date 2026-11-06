@@ -414,6 +414,29 @@ export async function updateAccount(
   });
 }
 
+export type AccountBatchStatusResponse = {
+  target: AccountStatus;
+  requested: number;
+  enabled: number;
+  disabled: number;
+  capped: number;
+  skipped: number;
+  failed: number;
+  errors: Array<{ hint: string; error: string }>;
+  items: Account[];
+  max_normal_accounts: number;
+};
+
+export async function batchUpdateAccountStatus(accessTokens: string[], status: Extract<AccountStatus, "正常" | "禁用">) {
+  return httpRequest<AccountBatchStatusResponse>("/api/accounts/batch-update-status", {
+    method: "POST",
+    body: {
+      access_tokens: accessTokens,
+      status,
+    },
+  });
+}
+
 export async function generateImage(prompt: string, model?: ImageModel, size?: string, quality = "auto") {
   return httpRequest<ImageResponse>(
     "/v1/images/generations",
