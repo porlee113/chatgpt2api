@@ -136,6 +136,29 @@ class AccountService:
             return False
         return int(account.get("quota") or 0) > 0
 
+    def _count_normal_accounts_locked(self) -> int:
+        return sum(1 for account in self._accounts.values() if account.get("status") == "正常")
+
+    def _apply_status_guards_locked(self, current: dict | None, account: dict) -> dict:
+        """Preserve 禁用; never promote into 正常 beyond max_normal_accounts."""
+        if not isinstance(account, dict):
+            return account
+        next_item = dict(account)
+        current_status = str((current or {}).get("status") or "").strip()
+        next_status = str(next_item.get("status") or "").strip()
+
+        # Explicit/manual or remote refresh must not auto-enable a disabled account.
+        if current_status == "禁用" and next_status in {"正常", "限流"}:
+            next_item["status"] = "禁用"
+            next_status = "禁用"
+
+        if next_status == "正常" and current_status != "正常":
+            if self._count_normal_accounts_locked() >= config.max_normal_accounts:
+                # Stay at previous non-normal status (限流/禁用/异常/empty→禁用).
+                fallback = current_status if current_status and current_status != "正常" else "禁用"
+                next_item["status"] = fallback
+        return next_item
+
     @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
         if not plan_type:
@@ -838,7 +861,8 @@ class AccountService:
             return [
                 token
                 for account in self._accounts.values()
-                if str(account.get("refresh_token") or "").strip()
+                if account.get("status") != "禁用"
+                and str(account.get("refresh_token") or "").strip()
                 and (token := str(account.get("access_token") or "").strip())
                 and self._token_needs_refresh(token)
             ]
@@ -1162,14 +1186,15 @@ class AccountService:
             added = 0
             skipped = 0
             for access_token, payload in deduped.items():
-                current = self._accounts.get(access_token)
-                if current is None:
+                existing = self._accounts.get(access_token)
+                if existing is None:
                     added += 1
                     self._cumulative_total += 1
                     self._save_cumulative_total()
                     current = {"created_at": self._now()}
                 else:
                     skipped += 1
+                    current = existing
                 incoming = dict(payload)
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
@@ -1182,6 +1207,8 @@ class AccountService:
                     }
                 )
                 if account is not None:
+                    # Keep existing 正常; only new/promoted 正常 consume remaining slots.
+                    account = self._apply_status_guards_locked(existing, account)
                     self._accounts[access_token] = account
             self._save_accounts()
             items = [dict(item) for item in self._accounts.values()]
@@ -1224,6 +1251,7 @@ class AccountService:
             account = self._normalize_account({**current, **updates, "access_token": access_token})
             if account is None:
                 return None
+            account = self._apply_status_guards_locked(current, account)
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
@@ -1322,6 +1350,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is None:
                 return None
+            account = self._apply_status_guards_locked(current, account)
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
@@ -1485,8 +1514,18 @@ class AccountService:
         access_tokens: list[str],
         progress_id: str | None = None,
         defer_invalid_removal: bool = True,
+        *,
+        include_disabled: bool = False,
     ) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        if not include_disabled:
+            filtered: list[str] = []
+            for token in access_tokens:
+                account = self.get_account(token)
+                if account is not None and account.get("status") == "禁用":
+                    continue
+                filtered.append(token)
+            access_tokens = filtered
         if not access_tokens:
             items = self.list_accounts()
             result = {"refreshed": 0, "errors": [], "items": items, "relogined": 0}
