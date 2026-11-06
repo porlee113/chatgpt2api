@@ -80,26 +80,42 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
-    interval_seconds = config.refresh_account_interval_minute * 60
+    interval_seconds = max(1, int(config.refresh_account_interval_minute or 5)) * 60
 
     def worker() -> None:
+        auto_info = bool(config.auto_refresh_accounts_enabled)
+        print(
+            "[account-watcher] started "
+            f"interval_minute={config.refresh_account_interval_minute} "
+            f"auto_refresh_accounts_enabled={auto_info} "
+            "(info/quota refresh off keeps OAuth refresh_token keepalive)"
+        )
+        if not auto_info:
+            print("[account-watcher] auto account info/quota refresh disabled; manual refresh only")
         while not stop_event.is_set():
             try:
-                limited_tokens = account_service.list_limited_tokens()
-                normal_tokens = account_service.list_normal_tokens()
-                expiring_tokens = account_service.list_expiring_access_tokens()
+                # Re-read each loop so settings changes apply without restart when config reloads.
+                auto_info = bool(config.auto_refresh_accounts_enabled)
+                if auto_info:
+                    limited_tokens = account_service.list_limited_tokens()
+                    normal_tokens = account_service.list_normal_tokens()
+                    expiring_tokens = account_service.list_expiring_access_tokens()
+                    tokens = list(dict.fromkeys([*limited_tokens, *normal_tokens, *expiring_tokens]))
+                    if tokens:
+                        print(
+                            "[account-watcher] checking "
+                            f"{len(limited_tokens)} limited accounts, "
+                            f"{len(normal_tokens)} normal accounts, "
+                            f"{len(expiring_tokens)} expiring access tokens"
+                        )
+                        account_service.refresh_accounts(tokens)
+                    expiring_token_set = set(expiring_tokens)
+                else:
+                    # Do not collect normal/limited/expiring lists or call fetch_remote_info.
+                    expiring_token_set = set()
+
                 keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
-                tokens = list(dict.fromkeys([*limited_tokens, *normal_tokens, *expiring_tokens]))
-                expiring_token_set = set(expiring_tokens)
                 keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
-                if tokens:
-                    print(
-                        "[account-watcher] checking "
-                        f"{len(limited_tokens)} limited accounts, "
-                        f"{len(normal_tokens)} normal accounts, "
-                        f"{len(expiring_tokens)} expiring access tokens"
-                    )
-                    account_service.refresh_accounts(tokens)
                 if keepalive_tokens:
                     print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
                     result = account_service.keepalive_refresh_tokens(keepalive_tokens)

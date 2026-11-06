@@ -481,6 +481,18 @@ class ConfigStore:
         return bool(value)
 
     @property
+    def auto_refresh_accounts_enabled(self) -> bool:
+        """Background watcher account info/quota refresh (get_user_info).
+
+        False: skip timed normal/limited/expiring fetch_remote_info.
+        Keepalive OAuth refresh_token renewal is independent and still runs.
+        """
+        value = self.data.get("auto_refresh_accounts_enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @property
     def max_normal_accounts(self) -> int:
         """Optional cap on concurrently "正常" accounts. 0 = unlimited (manual control)."""
         try:
@@ -581,6 +593,7 @@ class ConfigStore:
         data["image_remove_conversation_always"] = self.image_remove_conversation_always
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
+        data["auto_refresh_accounts_enabled"] = self.auto_refresh_accounts_enabled
         data["max_normal_accounts"] = self.max_normal_accounts
         data["auto_relogin_after_refresh"] = self.auto_relogin_after_refresh
         data["log_levels"] = self.log_levels
