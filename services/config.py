@@ -482,11 +482,11 @@ class ConfigStore:
 
     @property
     def max_normal_accounts(self) -> int:
-        """Max concurrently "正常" accounts. Manual enable still allowed but never above this."""
+        """Optional cap on concurrently "正常" accounts. 0 = unlimited (manual control)."""
         try:
-            return max(0, int(self.data.get("max_normal_accounts", 5)))
+            return max(0, int(self.data.get("max_normal_accounts", 0)))
         except (TypeError, ValueError):
-            return 5
+            return 0
 
     @property
     def auto_relogin_after_refresh(self) -> bool:

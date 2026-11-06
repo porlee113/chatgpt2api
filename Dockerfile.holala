@@ -1,5 +1,5 @@
-# Overlay on holala.1 (keeps prior max5 + b64 nosave patches). Fall back ARG to stock if needed.
-ARG BASE_IMAGE=chatgpt2api:1.8.0-holala.1
+# Overlay on holala.2 (batch status UI + prior max5/b64 patches).
+ARG BASE_IMAGE=chatgpt2api:1.8.0-holala.2
 FROM ${BASE_IMAGE}
 COPY VERSION /app/VERSION
 COPY services/account_service.py /app/services/account_service.py

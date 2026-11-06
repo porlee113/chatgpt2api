@@ -15,7 +15,7 @@ from services.storage.json_storage import JSONStorageBackend
 class BatchAccountStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         self._prev = config.data.get("max_normal_accounts")
-        config.data["max_normal_accounts"] = 5
+        config.data["max_normal_accounts"] = 0  # unlimited by default
 
     def tearDown(self) -> None:
         if self._prev is None:
@@ -37,41 +37,43 @@ class BatchAccountStatusTests(unittest.TestCase):
             ])
             result = s.batch_update_status(["a1", "a2", "a3", "a4"], "禁用")
             self.assertEqual(result["disabled"], 3)
-            self.assertEqual(result["skipped"], 1)  # already disabled
+            self.assertEqual(result["skipped"], 1)
             self.assertEqual(result["failed"], 0)
             self.assertTrue(all(a["status"] == "禁用" for a in s.list_accounts()))
 
-    def test_batch_enable_only_disabled_and_cap_when_zero_normal(self) -> None:
+    def test_batch_enable_95_disabled_when_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._svc(tmp)
+            s.add_account_items([{"access_token": f"d{i}", "status": "禁用", "quota": 3} for i in range(95)])
+            result = s.batch_update_status([f"d{i}" for i in range(95)], "正常")
+            self.assertEqual(result["enabled"], 95)
+            self.assertEqual(result["capped"], 0)
+            self.assertEqual(result["skipped"], 0)
+            self.assertEqual(result["failed"], 0)
+            normals = [a for a in s.list_accounts() if a["status"] == "正常"]
+            self.assertEqual(len(normals), 95)
+
+    def test_batch_enable_when_five_already_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._svc(tmp)
+            s.add_account_items([{"access_token": f"n{i}", "status": "正常", "quota": 2} for i in range(5)])
+            s.add_account_items([{"access_token": f"d{i}", "status": "禁用", "quota": 2} for i in range(5)])
+            result = s.batch_update_status([f"d{i}" for i in range(5)], "正常")
+            self.assertEqual(result["enabled"], 5)
+            self.assertEqual(result["capped"], 0)
+            normals = [a for a in s.list_accounts() if a["status"] == "正常"]
+            self.assertEqual(len(normals), 10)
+
+    def test_batch_enable_respects_positive_cap(self) -> None:
+        config.data["max_normal_accounts"] = 5
         with tempfile.TemporaryDirectory() as tmp:
             s = self._svc(tmp)
             s.add_account_items([{"access_token": f"d{i}", "status": "禁用", "quota": 3} for i in range(8)])
             result = s.batch_update_status([f"d{i}" for i in range(8)], "正常")
             self.assertEqual(result["enabled"], 5)
             self.assertEqual(result["capped"], 3)
-            self.assertEqual(result["skipped"], 0)
             normals = [a for a in s.list_accounts() if a["status"] == "正常"]
             self.assertEqual(len(normals), 5)
-
-    def test_batch_enable_when_three_normal_already(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            s = self._svc(tmp)
-            s.add_account_items([{"access_token": f"n{i}", "status": "正常", "quota": 2} for i in range(3)])
-            s.add_account_items([{"access_token": f"d{i}", "status": "禁用", "quota": 2} for i in range(5)])
-            result = s.batch_update_status([f"d{i}" for i in range(5)], "正常")
-            self.assertEqual(result["enabled"], 2)
-            self.assertEqual(result["capped"], 3)
-            normals = [a for a in s.list_accounts() if a["status"] == "正常"]
-            self.assertEqual(len(normals), 5)
-
-    def test_batch_enable_at_full_cap(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            s = self._svc(tmp)
-            s.add_account_items([{"access_token": f"n{i}", "status": "正常", "quota": 2} for i in range(5)])
-            s.add_account_items([{"access_token": "d0", "status": "禁用", "quota": 2}])
-            result = s.batch_update_status(["d0"], "正常")
-            self.assertEqual(result["enabled"], 0)
-            self.assertEqual(result["capped"], 1)
-            self.assertEqual(s.get_account("d0")["status"], "禁用")
 
     def test_batch_enable_skips_rate_limited_and_abnormal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

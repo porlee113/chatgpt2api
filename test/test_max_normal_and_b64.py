@@ -16,10 +16,12 @@ from services.protocol import conversation as conversation_mod
 from services.storage.json_storage import JSONStorageBackend
 
 
-class MaxNormalAccountTests(unittest.TestCase):
+class ManualNormalAndImportTests(unittest.TestCase):
+    """Default: max_normal_accounts=0 (unlimited). Cap tests set a positive value."""
+
     def setUp(self) -> None:
         self._prev = config.data.get("max_normal_accounts")
-        config.data["max_normal_accounts"] = 5
+        config.data["max_normal_accounts"] = 0
 
     def tearDown(self) -> None:
         if self._prev is None:
@@ -30,19 +32,16 @@ class MaxNormalAccountTests(unittest.TestCase):
     def _service(self, tmp: str) -> AccountService:
         return AccountService(JSONStorageBackend(Path(tmp) / "accounts.json"))
 
-    def test_import_fills_only_five_normal_slots(self) -> None:
+    def test_import_defaults_to_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(tmp)
-            tokens = [f"tok-{i}" for i in range(49)]
-            result = service.add_accounts(tokens)
+            result = service.add_accounts([f"tok-{i}" for i in range(49)])
             self.assertEqual(result["added"], 49)
             items = service.list_accounts()
-            normals = [a for a in items if a.get("status") == "正常"]
-            disabled = [a for a in items if a.get("status") == "禁用"]
-            self.assertEqual(len(normals), 5)
-            self.assertEqual(len(disabled), 44)
+            self.assertEqual(sum(1 for a in items if a.get("status") == "正常"), 0)
+            self.assertEqual(sum(1 for a in items if a.get("status") == "禁用"), 49)
 
-    def test_import_does_not_replace_existing_normals(self) -> None:
+    def test_reimport_preserves_existing_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(tmp)
             service.add_account_items(
@@ -50,13 +49,39 @@ class MaxNormalAccountTests(unittest.TestCase):
             )
             keep = {a["access_token"] for a in service.list_accounts() if a.get("status") == "正常"}
             self.assertEqual(len(keep), 5)
-            service.add_accounts([f"new-{i}" for i in range(10)])
+            # re-import same tokens + new ones
+            service.add_accounts([f"keep-{i}" for i in range(5)] + [f"new-{i}" for i in range(10)])
             normals = [a for a in service.list_accounts() if a.get("status") == "正常"]
             self.assertEqual(len(normals), 5)
             self.assertEqual({a["access_token"] for a in normals}, keep)
-            self.assertTrue(all(a.get("status") == "禁用" for a in service.list_accounts() if a["access_token"].startswith("new-")))
+            self.assertTrue(
+                all(a.get("status") == "禁用" for a in service.list_accounts() if a["access_token"].startswith("new-"))
+            )
 
-    def test_concurrent_import_never_exceeds_cap(self) -> None:
+    def test_manual_enable_beyond_five_when_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(tmp)
+            service.add_account_items(
+                [{"access_token": f"n{i}", "status": "正常", "quota": 1} for i in range(5)]
+            )
+            service.add_account_items([{"access_token": "d1", "status": "禁用", "quota": 5}])
+            updated = service.update_account("d1", {"status": "正常"})
+            self.assertEqual(updated["status"], "正常")
+            normals = [a for a in service.list_accounts() if a.get("status") == "正常"]
+            self.assertEqual(len(normals), 6)
+
+    def test_positive_cap_still_blocks_manual_enable(self) -> None:
+        config.data["max_normal_accounts"] = 5
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(tmp)
+            service.add_account_items(
+                [{"access_token": f"n{i}", "status": "正常", "quota": 1} for i in range(5)]
+            )
+            service.add_account_items([{"access_token": "d1", "status": "禁用", "quota": 5}])
+            updated = service.update_account("d1", {"status": "正常"})
+            self.assertEqual(updated["status"], "禁用")
+
+    def test_concurrent_import_all_disabled_when_unlimited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(tmp)
 
@@ -65,9 +90,9 @@ class MaxNormalAccountTests(unittest.TestCase):
 
             with ThreadPoolExecutor(max_workers=4) as pool:
                 list(pool.map(add_batch, range(4)))
-            normals = [a for a in service.list_accounts() if a.get("status") == "正常"]
-            self.assertLessEqual(len(normals), 5)
-            self.assertEqual(len(service.list_accounts()), 80)
+            items = service.list_accounts()
+            self.assertEqual(len(items), 80)
+            self.assertEqual(sum(1 for a in items if a.get("status") == "禁用"), 80)
 
     def test_refresh_skips_disabled_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,7 +122,6 @@ class MaxNormalAccountTests(unittest.TestCase):
                 "services.openai_backend_api.OpenAIBackendAPI.get_user_info",
                 return_value={"quota": 10, "status": "正常", "email": "a@b.c", "type": "plus"},
             ):
-                # force include_disabled path
                 service.refresh_access_token = lambda token, **kwargs: token  # type: ignore[method-assign]
                 result = service.refresh_accounts(["d1"], include_disabled=True)
             account = service.get_account("d1")
@@ -111,65 +135,36 @@ class MaxNormalAccountTests(unittest.TestCase):
             service = self._service(tmp)
             service.add_account_items(
                 [
-                    {
-                        "access_token": "n1",
-                        "status": "正常",
-                        "refresh_token": "rt-n",
-                    },
-                    {
-                        "access_token": "d1",
-                        "status": "禁用",
-                        "refresh_token": "rt-d",
-                    },
+                    {"access_token": "n1", "status": "正常", "refresh_token": "rt-n"},
+                    {"access_token": "d1", "status": "禁用", "refresh_token": "rt-d"},
                 ]
             )
             service._token_needs_refresh = lambda token, force=False: True  # type: ignore[method-assign]
             tokens = service.list_expiring_access_tokens()
             self.assertEqual(tokens, ["n1"])
 
-    def test_rate_limit_restore_respects_cap(self) -> None:
+    def test_rate_limit_restore_allowed_when_unlimited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(tmp)
             service.add_account_items(
                 [{"access_token": f"n{i}", "status": "正常", "quota": 3} for i in range(5)]
             )
             service.add_account_items([{"access_token": "lim", "status": "限流", "quota": 0}])
-            # remote says restored
+            updated = service.update_account("lim", {"status": "正常", "quota": 20})
+            self.assertEqual(updated["status"], "正常")
+            self.assertEqual(updated["quota"], 20)
+
+    def test_rate_limit_restore_respects_positive_cap(self) -> None:
+        config.data["max_normal_accounts"] = 5
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(tmp)
+            service.add_account_items(
+                [{"access_token": f"n{i}", "status": "正常", "quota": 3} for i in range(5)]
+            )
+            service.add_account_items([{"access_token": "lim", "status": "限流", "quota": 0}])
             updated = service.update_account("lim", {"status": "正常", "quota": 20})
             self.assertEqual(updated["status"], "限流")
             self.assertEqual(updated["quota"], 20)
-            normals = [a for a in service.list_accounts() if a.get("status") == "正常"]
-            self.assertEqual(len(normals), 5)
-
-    def test_manual_enable_blocked_at_cap(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            service = self._service(tmp)
-            service.add_account_items(
-                [{"access_token": f"n{i}", "status": "正常", "quota": 1} for i in range(5)]
-            )
-            service.add_account_items([{"access_token": "d1", "status": "禁用", "quota": 5}])
-            updated = service.update_account("d1", {"status": "正常"})
-            self.assertEqual(updated["status"], "禁用")
-
-    def test_mark_image_result_restore_respects_cap(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            service = self._service(tmp)
-            service.add_account_items(
-                [{"access_token": f"n{i}", "status": "正常", "quota": 2} for i in range(5)]
-            )
-            service.add_account_items([{"access_token": "lim", "status": "限流", "quota": 1}])
-            updated = service.mark_image_result("lim", success=True)
-            # success with quota 1→0 becomes 限流; use quota 2 path
-            service.update_account("lim", {"status": "限流", "quota": 2})
-            # bypass disabled preserve: set lim quota path via mark from 限流 with remaining
-            # mark_image_result: success decrements; if was 限流 and quota>0 after → tries 正常
-            service._accounts["lim"]["status"] = "限流"
-            service._accounts["lim"]["quota"] = 2
-            updated = service.mark_image_result("lim", success=True)
-            self.assertIsNotNone(updated)
-            # quota 1, would want 正常 but cap full → stay 限流
-            self.assertEqual(updated["quota"], 1)
-            self.assertEqual(updated["status"], "限流")
 
 
 class B64NoSaveTests(unittest.TestCase):

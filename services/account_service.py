@@ -140,9 +140,9 @@ class AccountService:
         return sum(1 for account in self._accounts.values() if account.get("status") == "正常")
 
     def _apply_status_guards_locked(self, current: dict | None, account: dict) -> dict:
-        """Never promote into 正常 beyond max_normal_accounts.
+        """Optionally block promote-to-正常 when max_normal_accounts > 0.
 
-        Intentional enable (UI / batch) is allowed when under the cap.
+        0 means unlimited: user decides via single/batch enable.
         Remote refresh must keep 禁用 via fetch_remote_info, not here.
         """
         if not isinstance(account, dict):
@@ -150,9 +150,10 @@ class AccountService:
         next_item = dict(account)
         current_status = str((current or {}).get("status") or "").strip()
         next_status = str(next_item.get("status") or "").strip()
+        max_normal = int(config.max_normal_accounts or 0)
 
-        if next_status == "正常" and current_status != "正常":
-            if self._count_normal_accounts_locked() >= config.max_normal_accounts:
+        if max_normal > 0 and next_status == "正常" and current_status != "正常":
+            if self._count_normal_accounts_locked() >= max_normal:
                 # Stay at previous non-normal status (限流/禁用/异常/empty→禁用).
                 fallback = current_status if current_status and current_status != "正常" else "禁用"
                 next_item["status"] = fallback
@@ -1197,6 +1198,13 @@ class AccountService:
                 incoming = dict(payload)
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
+                if existing is None:
+                    # New imports default to 禁用; explicit status in payload still wins.
+                    if not str(incoming.get("status") or "").strip():
+                        incoming["status"] = "禁用"
+                else:
+                    # Re-import must not overwrite an existing account's status.
+                    incoming.pop("status", None)
                 account = self._normalize_account(
                     {
                         **current,
@@ -1206,7 +1214,6 @@ class AccountService:
                     }
                 )
                 if account is not None:
-                    # Keep existing 正常; only new/promoted 正常 consume remaining slots.
                     account = self._apply_status_guards_locked(existing, account)
                     self._accounts[access_token] = account
             self._save_accounts()
@@ -1243,7 +1250,7 @@ class AccountService:
         """Bulk set status for selected accounts.
 
         - status=禁用: apply to every selected account that is not already 禁用.
-        - status=正常: only accounts currently 禁用; max_normal_accounts still enforced.
+        - status=正常: only accounts currently 禁用; optional max_normal_accounts (>0) still enforced.
         Never leaks raw tokens in the summary; hints use anonymize_token / email.
         """
         target = str(status or "").strip()

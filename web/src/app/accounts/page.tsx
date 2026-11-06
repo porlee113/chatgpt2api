@@ -697,7 +697,7 @@ function AccountsPageContent() {
         return;
       }
       const ok = window.confirm(
-        `确定尝试启用选中的 ${disabledSelected} 个禁用账号？最多补足至 5 个正常（仅处理禁用号，不会把异常/限流设为正常）。`,
+        `选中禁用账号共 ${disabledSelected} 个将设为正常（仅处理禁用号，不会把异常/限流设为正常）。是否继续？`,
       );
       if (!ok) return;
     }
@@ -721,7 +721,9 @@ function AccountsPageContent() {
       } else {
         const parts = [
           `已启用 ${data.enabled} 个`,
-          data.capped ? `因 ${data.max_normal_accounts} 正常上限未启用 ${data.capped} 个` : "",
+          data.capped && data.max_normal_accounts > 0
+            ? `因正常上限(${data.max_normal_accounts})未启用 ${data.capped} 个`
+            : "",
           data.skipped ? `非禁用跳过 ${data.skipped} 个` : "",
           data.failed ? `失败 ${data.failed} 个` : "",
         ].filter(Boolean);
@@ -1076,7 +1078,7 @@ function AccountsPageContent() {
                   className="h-8 rounded-lg px-3 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
                   onClick={() => void handleBatchUpdateStatus("正常")}
                   disabled={selectedTokens.length === 0 || isBatchUpdating || isUpdating || isDeleting || isRefreshing || isRelogining}
-                  title="仅处理选中的禁用账号，最多补足至 5 个正常"
+                  title="仅处理选中的禁用账号；启用数量由你手动决定"
                 >
                   {isBatchUpdating ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
                   批量取消禁用
